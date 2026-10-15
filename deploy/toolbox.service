@@ -1,0 +1,18 @@
+[Unit]
+Description=Irankine (inzineriniai irankiai)
+After=network.target
+
+[Service]
+User=toolbox
+Group=toolbox
+WorkingDirectory=/opt/toolbox
+EnvironmentFile=/etc/toolbox.env
+ExecStart=/opt/toolbox/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8010 --proxy-headers --forwarded-allow-ips=127.0.0.1
+# Jei skaičiavimas viršija ribą, nužudomas tik jo procesas (užduotis pažymima klaida), serveris lieka gyvas
+MemoryHigh=3000M
+MemoryMax=3300M
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

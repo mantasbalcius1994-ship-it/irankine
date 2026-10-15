@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="lt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Įrankinė</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="side" id="side">
+    <a class="brand" href="#/"><span class="brand-mark" aria-hidden="true"></span><span id="brand-title">Įrankinė</span></a>
+    <nav id="nav" aria-label="Įrankiai"></nav>
+    <div class="side-foot">
+      <button class="linkbtn" id="btn-history" type="button">Ankstesni skaičiavimai</button>
+    </div>
+  </aside>
+
+  <main class="main" id="main">
+    <section class="home" id="view-home" hidden>
+      <h1>Įrankinė</h1>
+      <p class="lead">Pasirinkite įrankį kairėje. Failai apdorojami serveryje, rezultatai saugomi 3 paras.</p>
+      <div id="home-list" class="home-list"></div>
+    </section>
+
+    <section class="tool" id="view-tool" hidden>
+      <div class="pane">
+        <header class="tool-head">
+          <h1 id="tool-title"></h1>
+          <p id="tool-desc"></p>
+          <details class="tool-help" id="tool-help-wrap"><summary>Patarimai</summary><div id="tool-help"></div></details>
+        </header>
+        <form id="tool-form" autocomplete="off">
+          <div id="inputs"></div>
+          <div id="params"></div>
+          <div class="actions">
+            <button class="run" id="btn-run" type="submit">Skaičiuoti</button>
+            <div class="preset">
+              <button type="button" class="linkbtn" id="btn-reset">Numatytieji</button>
+              <button type="button" class="linkbtn" id="btn-export">Išsaugoti nustatymus</button>
+              <label class="linkbtn">Įkelti nustatymus<input type="file" id="preset-file" accept=".json" hidden></label>
+            </div>
+          </div>
+          <p class="form-error" id="form-error" role="alert" hidden></p>
+        </form>
+      </div>
+
+      <div class="stage">
+        <div class="tabs" role="tablist">
+          <button role="tab" data-tab="plan" aria-selected="true">Planas</button>
+          <button role="tab" data-tab="chart">Nuokrypiai</button>
+          <button role="tab" data-tab="report">Ataskaita</button>
+          <button role="tab" data-tab="log">Žurnalas</button>
+          <span class="job-status" id="job-status"></span>
+        </div>
+        <div class="tabpanes">
+          <div class="tabpane" data-pane="plan">
+            <canvas id="plan"></canvas>
+            <div class="plan-tools">
+              <button type="button" id="btn-fit" title="Rodyti viską">Viskas</button>
+            </div>
+            <div class="legend" id="plan-legend" hidden>
+              <span><i class="sw sw-line"></i>tiesė</span><span><i class="sw sw-arc"></i>lankas</span>
+              <span><i class="sw sw-pt"></i>įvesties taškai</span><span><i class="sw sw-bad"></i>už tolerancijos</span>
+            </div>
+            <div class="tip" id="plan-tip" hidden></div>
+            <div class="empty" id="plan-empty">Įkelkite failus ir paspauskite „Skaičiuoti“. Rezultatas bus parodytas čia.</div>
+          </div>
+          <div class="tabpane" data-pane="chart" hidden>
+            <div id="charts"></div>
+          </div>
+          <div class="tabpane" data-pane="report" hidden><pre id="report" class="mono"></pre></div>
+          <div class="tabpane" data-pane="log" hidden><pre id="log" class="mono"></pre></div>
+        </div>
+        <div class="results" id="results" hidden>
+          <div class="summary" id="summary"></div>
+          <div class="downloads" id="downloads"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="history" id="view-history" hidden>
+      <h1>Ankstesni skaičiavimai</h1>
+      <table class="tbl" id="history-table"><thead><tr><th>Data</th><th>Įrankis</th><th>Failai</th><th>Būsena</th><th></th></tr></thead><tbody></tbody></table>
+    </section>
+  </main>
+</div>
+<script src="static/app.js"></script>
+</body>
+</html>
