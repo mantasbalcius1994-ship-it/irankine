@@ -15,7 +15,7 @@ def test_linefit_end_to_end():
         assert any(t["id"] == "linefit" for t in c.get("/api/info").json()["tools"])
         r = c.post("/api/tools/linefit/run",
                    files=[("files", ("test.dxf", (DATA / "test.dxf").read_bytes()))],
-                   data={"params": json.dumps({"h_tol_line": 15, "h_tol_arc": 15, "v_tol": 8})})
+                   data={"params": json.dumps({"mode": "lankai", "h_tol_line": 15, "h_tol_arc": 15, "v_tol": 8})})
         assert r.status_code == 200, r.text
         jid = r.json()["job_id"]
         for _ in range(240):

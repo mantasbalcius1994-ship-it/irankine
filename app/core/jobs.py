@@ -41,7 +41,7 @@ def _execute(job_dir: str, tool_id: str):
         meta["progress"] = max(0.0, min(1.0, float(v)))
         _write_json(d / "job.json", meta)
 
-    meta.update(status="running", started=time.time())
+    meta.update(status="running", started=time.time(), pid=os.getpid())
     _write_json(d / "job.json", meta)
     try:
         tool = discover()[tool_id]
@@ -64,15 +64,43 @@ def _execute(job_dir: str, tool_id: str):
 
 
 class JobManager:
-    def __init__(self, root: Path, workers: int = 2, ttl_hours: float = 72):
+    def __init__(self, root: Path, workers: int = 2, ttl_hours: float = 72, timeout_min: float = 30):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.ttl = ttl_hours * 3600
+        self.timeout = timeout_min * 60
+        threading.Thread(target=self._watchdog, daemon=True).start()
         self.workers = workers
         self._lock = threading.Lock()
         self._broken = False
         self.pool = self._new_pool()
         self._recover()
+
+    def _watchdog(self, period=15):
+        """Užduotis, vykdoma ilgiau nei limitas, nutraukiama (kad neblokuotų eilės ir atnaujinimų)."""
+        import signal
+        while True:
+            time.sleep(period)
+            try:
+                for f in self.root.glob("*/job.json"):
+                    m = _read_json(f)
+                    if m.get("status") != "running" or not m.get("started"):
+                        continue
+                    if time.time() - m["started"] < self.timeout:
+                        continue
+                    m.update(status="error", finished=time.time(),
+                             error=f"Viršytas laiko limitas ({self.timeout / 60:.0f} min.). Sumažinkite duomenų kiekį "
+                                   "(mažiau linijų / retinimas) arba padidinkite tolerancijas.")
+                    _write_json(f, m)
+                    with open(f.parent / "log.txt", "a", encoding="utf-8") as lf:
+                        lf.write("KLAIDA: viršytas laiko limitas, skaičiavimas nutrauktas\n")
+                    if m.get("pid"):
+                        try:
+                            os.kill(int(m["pid"]), signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
+            except Exception:
+                pass
 
     def _new_pool(self):
         return ProcessPoolExecutor(max_workers=self.workers, mp_context=mp.get_context("spawn"))

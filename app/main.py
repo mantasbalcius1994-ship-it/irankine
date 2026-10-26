@@ -26,6 +26,7 @@ TITLE = os.environ.get("TOOLBOX_TITLE", "Įrankinė")
 DATA = Path(os.environ.get("TOOLBOX_DATA", BASE.parent / "data"))
 WORKERS = int(os.environ.get("TOOLBOX_WORKERS", "1"))
 TTL_H = float(os.environ.get("TOOLBOX_JOB_TTL_H", "72"))
+TIMEOUT_MIN = float(os.environ.get("TOOLBOX_JOB_TIMEOUT_MIN", "30"))
 MAX_UPLOAD = int(float(os.environ.get("TOOLBOX_MAX_UPLOAD_MB", "500")) * 1024 * 1024)
 AUTH_USER = os.environ.get("TOOLBOX_USER")
 AUTH_PASS = os.environ.get("TOOLBOX_PASS")
@@ -38,7 +39,7 @@ jobs: JobManager | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global jobs
-    jobs = JobManager(DATA / "jobs", WORKERS, TTL_H)
+    jobs = JobManager(DATA / "jobs", WORKERS, TTL_H, TIMEOUT_MIN)
 
     async def janitor():
         while True:

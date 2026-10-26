@@ -20,6 +20,7 @@ class Param:
     step: float | None = None
     choices: list | None = None    # [[reikšmė, pavadinimas], ...]
     enabled_by: str | None = None  # bool parametro raktas, kuris įjungia šį laukelį
+    show_if: str | None = None     # rodomas tik kai sąlyga tenkinama: "mode=retinti" arba "mode!=retinti"
 
     def coerce(self, v):
         if v is None or v == "":

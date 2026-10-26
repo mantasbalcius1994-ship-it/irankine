@@ -131,7 +131,7 @@ function renderParams() {
         row = h("div", { class: "field check" }, cb, h("label", { for: id }, p.label));
       } else if (p.type === "choice") {
         const sel = h("select", { id, onchange: (e) => save(e.target.value) }, ...p.choices.map(([v, l]) => h("option", { value: v, selected: v === S.values[p.key] }, l)));
-        row = h("div", { class: "field" }, h("label", { for: id }, p.label), sel);
+        row = h("div", { class: "field wide" }, h("label", { for: id }, p.label), sel);
       } else if (p.type === "str") {
         const inp = h("input", { type: "text", id, value: S.values[p.key] ?? "", oninput: (e) => save(e.target.value) });
         row = h("div", { class: "field wide" }, h("label", { for: id }, p.label), inp);
@@ -142,6 +142,7 @@ function renderParams() {
       }
       row.dataset.key = p.key;
       if (p.enabled_by) row.dataset.enabledBy = p.enabled_by;
+      if (p.show_if) row.dataset.showIf = p.show_if;
       if (p.help) row.append(h("div", { class: "hint" }, p.help));
       fs.append(row);
     }
@@ -150,7 +151,16 @@ function renderParams() {
   syncEnabled();
 }
 
+function condOk(expr) {
+  const m = expr.match(/^(\w+)(!?=)(.*)$/);
+  if (!m) return true;
+  const v = String(S.values[m[1]] ?? "");
+  return m[2] === "=" ? v === m[3] : v !== m[3];
+}
+
 function syncEnabled() {
+  for (const row of $$("#params [data-show-if]")) row.hidden = !condOk(row.dataset.showIf);
+  for (const fs of $$("#params fieldset")) fs.hidden = $$(".field", fs).every((r) => r.hidden);
   for (const row of $$("#params [data-enabled-by]")) {
     const on = !!S.values[row.dataset.enabledBy];
     row.classList.toggle("off", !on);

@@ -25,7 +25,7 @@ def test_worker_killed():
     jm = JobManager(Path(tempfile.mkdtemp()), workers=1)
     tool = discover()["linefit"]
     dxf = (Path(__file__).parent / "data" / "test.dxf").read_bytes()
-    p = tool.parse_params({"h_tol_line": 15, "h_tol_arc": 15, "v_tol": 8})
+    p = tool.parse_params({"mode": "lankai", "h_tol_line": 15, "h_tol_arc": 15, "v_tol": 8})
     j1 = jm.create(tool, p, {"files": [("a.dxf", dxf)]})
     for _ in range(200):
         if jm.get(j1)["status"] == "running" and jm.pool._processes:

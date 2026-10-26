@@ -22,5 +22,5 @@ Prieš push: `python tests/test_geo.py && python tests/test_smoke.py && python t
 Vartotojo duomenų failų (DXF, LAZ, IFC) į repozitoriją NEDĖTI - ji vieša.
 
 ## Planas (eilė)
-0. Branduolys + diegimas ✔  1. linefit „tik planas“ (laukiama kelias_1/3_ali DXF)  2. Linijų valymas ir retinimas ✔  3. Paviršių palyginimas, tūriai
+0. Branduolys + diegimas ✔  1-2. linefit: režimai retinti / lankai / tik planas + valymas ✔ (laukiama tikrų bortų DXF patikrai)  3. Paviršių palyginimas, tūriai
 4. Išpildomųjų taškų kontrolė  5. Ofsetų šablonai, šlaitai  6. IFC → DXF  7. PDF vektoriai / georeferencavimas

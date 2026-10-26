@@ -138,9 +138,9 @@ def test_tool_end_to_end():
 
     from app.core.jobs import JobManager
     from app.core.registry import discover
-    tool = discover()["lineclean"]
+    tool = discover()["linefit"]
     jm = JobManager(TMP / "jobs", workers=1)
-    params = tool.parse_params({"tol_h": 10, "tol_v": 5, "dups": True, "join": True, "join_gap": 5})
+    params = tool.parse_params({"mode": "retinti", "tol_h": 10, "tol_v": 5, "dups": True, "join": True, "join_gap": 5})
     jid = jm.create(tool, params, {"files": [("drape.dxf", f.read_bytes())]})
     for _ in range(240):
         m = jm.get(jid)
@@ -171,6 +171,40 @@ def test_tool_end_to_end():
     row = {r["Sluoksnis"]: r for r in prev["table"]}
     assert row["BORTAS"]["Dublikatų"] == 1 and row["KRASTAS"]["Sujungta"] == 1
     assert row["BORTAS"]["max Δz, mm"] <= 5.0 and row["BORTAS"]["max Δplan, mm"] <= 10.0
+
+
+
+def test_plan_only_keeps_z():
+    """Režimas „tik planas“: aukščiai tiksliai iš originalių taškų, planas - tiesės/lankai."""
+    from app.geo import io_landxml
+    from app.core.jobs import JobManager
+    from app.core.registry import discover
+    surf = make_surface()
+    D = drape(surf, road_line())                 # tanki 3D linija (planas: tiesė-lankas-tiesė)
+    D[:, :2] += rng.normal(0, 0.003, (len(D), 2))
+    w = io_dxf.DxfWriter()
+    w.polyline3d(D, "BORTAS", 3)
+    f = TMP / "planas.dxf"
+    w.save(f)
+    tool = discover()["linefit"]
+    jm = JobManager(TMP / "jobs_pl", workers=1)
+    t0 = time.time()
+    jid = jm.create(tool, tool.parse_params({"mode": "planas", "h_tol_line": 15, "h_tol_arc": 15}),
+                    {"files": [("planas.dxf", f.read_bytes())]})
+    for _ in range(600):
+        m = jm.get(jid)
+        if m["status"] in ("done", "error"):
+            break
+        time.sleep(0.5)
+    jm.pool.shutdown()
+    assert m["status"] == "done", (m.get("error"), "\n".join(m["log"]))
+    print(f"   tik planas: {len(D)} tšk., {time.time() - t0:.1f} s")
+    al = io_landxml.read_alignments(TMP / "jobs_pl" / jid / "out" / "planas_fit.xml")[0]
+    kinds = [e.kind for e in al.elems]
+    assert kinds.count("arc") >= 1 and len(kinds) <= 5, kinds
+    sta, off, _ = al.station_offset(D[:, :2])
+    assert np.abs(off).max() <= 0.015 + 1e-6
+    assert np.nanmax(np.abs(al.z_at(sta) - D[:, 2])) < 1e-3       # aukščiai išlaikyti (LandXML 4 skaitm.)
 
 
 if __name__ == "__main__":

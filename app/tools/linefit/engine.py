@@ -16,11 +16,12 @@ Pvz.:
   python linefit.py bortai.dxf --layer BORTAS --tol-line 0.01 --tol-arc 0.015 --v-tol 0.005 --plot
 """
 import argparse
+import time as _time
 import datetime as dt
 import math
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.optimize import least_squares
@@ -54,6 +55,8 @@ class Settings:
     v_max_len: float = 300.0    # m, max vertikalios kreivės ilgis
     v_sharp_dg: float = 0.0     # %, VPI su didesniu skirtumu - be kreivės (0 = išjungta)
     # bendra
+    keep_z: bool = False        # tik planas: aukščiai paimami iš originalių taškų (profilis = jų PVI)
+    prethin: float = 0.0        # m; >0 - prieš lankų pritaikymą taškai išretinami (greičiau)
     max_refine: int = 6
     max_nfev: int = 60          # optimizatoriaus iteracijų riba
     report_tol: float = 0.0     # m, 0 -> naudoti tol_*
@@ -64,11 +67,12 @@ class Settings:
 # =====================================================================
 class Elem:
     """Pastovaus kreivumo elementas: tiesė (k=0) arba lankas (k=±1/R, + = į kairę)."""
-    __slots__ = ("p", "th", "k", "L", "s0")
+    __slots__ = ("p", "th", "k", "L", "s0", "_end")
 
     def __init__(self, p, th, k, L, s0):
         self.p = np.asarray(p, float)
         self.th, self.k, self.L, self.s0 = float(th), float(k), float(L), float(s0)
+        self._end = None
 
     @property
     def is_arc(self):
@@ -82,7 +86,9 @@ class Elem:
         return elem_xy(self.p, self.th, self.k, t)
 
     def end(self):
-        return self.xy([self.L])[0]
+        if self._end is None:                   # skaičiuojama vieną kartą (projekcijose kviečiama milijonus kartų)
+            self._end = self.xy([self.L])[0]
+        return self._end
 
     def th_end(self):
         return self.th + self.k * self.L
@@ -254,8 +260,12 @@ def segment(P, tolL, tolA, st):
     return segs
 
 
-def init_params(P, segs):
-    types, Ls, kfull, start = [], [], [], None
+def init_params(P, segs, r_join=None):
+    """Pradinė G1 grandinė iš segmentų. Jei kito segmento pradžios kryptis nesutampa su grandinės kryptimi
+    (pvz. dvi tiesės su kampu), įterpiamas jungiamasis lankas (spindulys r_join), kad posūkis netemptų
+    visos grandinės. Grąžina (types, x, ranges): ranges[e] = (tipas, pirmas tšk., paskutinis tšk.)."""
+    types, Ls, kfull, ranges, start = [], [], [], [], None
+    th_c = None
     for si, (t, i, j) in enumerate(segs):
         Q = P[i:j + 1]
         if t == "L":
@@ -271,18 +281,31 @@ def init_params(P, segs):
             sp = cen + R * r
             tang = sg * np.array([-r[1], r[0]])
             th, k, L = math.atan2(tang[1], tang[0]), sg / R, max(R * abs(ang), 1e-3)
-        types.append(t); Ls.append(L); kfull.append(k)
         if si == 0:
             start = [sp[0], sp[1], th]
-    return types, pack(start, types, Ls, kfull)
+            th_c = th
+        elif r_join:
+            dth = (th - th_c + math.pi) % (2 * math.pi) - math.pi
+            if abs(dth) > 0.035:                     # > ~2°: jungiamasis lankas
+                La = abs(dth) * r_join
+                cut = min(La / 2, 0.4 * Ls[-1], 0.4 * L)
+                Ls[-1] -= cut
+                L -= cut
+                types.append("A"); Ls.append(La); kfull.append(math.copysign(1 / r_join, dth))
+                ranges.append(("A", i, i))
+                th_c += dth
+        types.append(t); Ls.append(L); kfull.append(k); ranges.append((t, i, j))
+        th_c = th_c + k * L if si else th + k * L
+    return types, pack(start, types, Ls, kfull), ranges
 
 
 # ---------- globalus optimizavimas ----------
 def h_bounds(types, x, st):
     m = len(types)
+    _, Ls0, kfull = unpack(x, types)
     lo = [-np.inf] * 3 + [1e-3] * m
-    hi = [np.inf] * 3 + [np.inf] * m
-    _, _, kfull = unpack(x, types)
+    # ilgis negali „išbėgti“ (kitaip lankas gali apsukti pilną ratą ir vis tiek atrodyti „per toleranciją“)
+    hi = [np.inf] * 3 + [max(1.5 * L, L + 2.0) for L in Ls0]
     for t, k in zip(types, kfull):
         if t == "A":
             if k >= 0:
@@ -311,6 +334,58 @@ def optimize_h(P, types, x, st):
     r = least_squares(fun, x, bounds=(lo, hi), x_scale="jac", method="trf",
                       max_nfev=st.max_nfev, ftol=1e-6, xtol=1e-8)
     return r.x
+
+
+WINDOW = 4          # elementų skaičius slankiajame lange
+IRREG_MIN_EL = 8    # netaisyklinga linija: daugiau elementų nei tiek...
+IRREG_AVG_LEN = 10.0  # ...ir vidutinis elemento ilgis mažesnis (m)
+PART_BUDGET_S = 8.0   # laiko biudžetas vienai linijos daliai (viršijus - tiesės per toleranciją)
+
+
+def optimize_windowed(P, types, x, segs, st, w=WINDOW):
+    """Ilgoms grandinėms: optimizuojama po `w` elementų iš eilės, pirmasis lango elementas užfiksuojamas
+    ir langas slenka toliau. Parametrų nedaug -> greita, klaida nesikaupia. Trumpoms - globalus optimize_h."""
+    m = len(types)
+    if m <= w + 2:
+        return optimize_h(P, types, x, st)
+    start, Ls, kfull = unpack(x, types)
+    start, Ls, kfull = list(start), list(Ls), list(kfull)
+    cur_p, cur_th = np.array(start[:2], float), float(start[2])
+    for k in range(m):
+        win = list(range(k, min(k + w, m)))
+        tw = [types[i] for i in win]
+        i0, i1 = segs[k][1], segs[win[-1]][2]
+        Pw = P[i0:i1 + 1]
+        free_start = k == 0
+        sub = pack([cur_p[0], cur_p[1], cur_th], tw, [Ls[i] for i in win], [kfull[i] for i in win])
+        lo, hi, sub = h_bounds(tw, sub, st)
+        sel = slice(0, None) if free_start else slice(3, None)
+        fixed = sub[:3].copy()
+
+        tol_end = min(st.tol_line, st.tol_arc)
+
+        def fun(v, tw=tw, Pw=Pw, fixed=fixed, free_start=free_start):
+            xx = v if free_start else np.r_[fixed, v]
+            el = build_chain(xx, tw)
+            off, _, idx = project(Pw, el)
+            end = (el[-1].end() - Pw[-1]) / tol_end   # inkaras: lango galas ties paskutiniu tašku
+            return np.r_[off / h_residual_tol(tw, idx, st), end]
+        r = least_squares(fun, sub[sel], bounds=(lo[sel], hi[sel]), x_scale="jac", method="trf",
+                          max_nfev=max(20, st.max_nfev // 2), ftol=1e-5, xtol=1e-7)
+        sub = r.x if free_start else np.r_[fixed, r.x]
+        st_w, Lw, kw = unpack(sub, tw)
+        if free_start:
+            start = list(st_w); cur_p, cur_th = np.array(start[:2], float), float(start[2])
+        for j, i in enumerate(win):
+            Ls[i], kfull[i] = float(Lw[j]), float(kw[j])
+        if win[-1] == m - 1:                         # paskutinis langas - užfiksuojama viskas
+            break
+        e = Elem(cur_p, cur_th, kfull[k], Ls[k], 0.0)  # užfiksuojamas elementas k
+        cur_p, cur_th = e.end(), e.th_end()
+    x = pack(start, types, Ls, kfull)
+    if m <= 15:                                      # trumpai grandinei - bendras patikslinimas
+        x = optimize_h(P, types, x, st)
+    return x
 
 
 def h_check(P, types, x, st):
@@ -358,8 +433,14 @@ def op_to_line(types, x, e):
     return T, pack(start, T, Ls, kfull)
 
 
-def simplify_h(P, types, x, st, log):
+def simplify_h(P, types, x, st, log, budget_s=20.0, max_ratio=1.0):
+    """Bando šalinti elementus / lankus keisti tiesėmis, kol tolerancija išlaikoma. Ribojama laiku."""
+    import time as _t
+    t0 = _t.time()
     while len(types) > 1:
+        if _t.time() - t0 > budget_s:
+            log(f"    supaprastinimas sustabdytas po {budget_s:.0f} s ({len(types)} el.)")
+            break
         el = build_chain(x, types)
         cands = []
         arcs = sorted([e for e, t in enumerate(types) if t == "A"], key=lambda e: abs(el[e].k))
@@ -367,13 +448,15 @@ def simplify_h(P, types, x, st, log):
         cands += [("pašalinti", op_remove, e) for e in np.argsort([e.L for e in el])]
         done = False
         for name, op, e in cands:
+            if _t.time() - t0 > budget_s:
+                break
             r = op(types, x, int(e))
             if r is None:
                 continue
             T2, x2 = r
             x2 = optimize_h(P, T2, x2, st)
-            ok, _ = h_check(P, T2, x2, st)
-            if ok:
+            _, ratio2 = h_check(P, T2, x2, st)
+            if ratio2 <= max_ratio + 1e-6:
                 log(f"    supaprastinta: {name} #{e} -> {len(T2)} el.")
                 types, x, done = T2, x2, True
                 break
@@ -382,36 +465,97 @@ def simplify_h(P, types, x, st, log):
     return types, x
 
 
-def fit_horizontal(P, st, log):
+def fit_horizontal(P, st, log, deadline=None):
     f, best = 0.8, None
     for it in range(st.max_refine):
+        if deadline and best is not None and _time.time() > deadline:
+            log("    planas: laiko biudžetas baigėsi")
+            return best[0], best[1]
         segs = segment(P, st.tol_line * f, st.tol_arc * f, st)
         if best is not None and len(segs) > max(12, len(P) // 4):
             log("    planas: per daug elementų - tolerancija tikriausiai mažesnė už duomenų triukšmą")
             break
-        types, x = init_params(P, segs)
-        x = optimize_h(P, types, x, st)
+        types, x, rng_ = init_params(P, segs, max(st.r_min, 0.5))
+        x = optimize_windowed(P, types, x, rng_, st)
         ok, ratio = h_check(P, types, x, st)
         log(f"    planas: iter {it + 1}, segm.tol x{f:.2f}, {len(types)} el., max nuokr./tol = {ratio:.2f}")
         if best is None or ratio < best[2]:
             best = (types, x, ratio)
         if ok:
             break
+        if it >= 1 and best[2] > 3:              # beviltiška - nešvaistomas laikas (bus tiesės)
+            log("    planas: lankų pritaikymas nekonverguoja")
+            return best[0], best[1]
         f *= 0.6
-    if best[2] > 1.0 + 1e-6:
+    if 1.0 + 1e-6 < best[2] <= 3 and not (deadline and _time.time() > deadline):
         # tolerancija nepasiekta - bandomi paprastesni modeliai, imamas mažiausio nuokrypio
         for f in (1.5, 2.5):
-            types, x = init_params(P, segment(P, st.tol_line * f, st.tol_arc * f, st))
-            x = optimize_h(P, types, x, st)
+            segs = segment(P, st.tol_line * f, st.tol_arc * f, st)
+            types, x, rng_ = init_params(P, segs, max(st.r_min, 0.5))
+            x = optimize_windowed(P, types, x, rng_, st)
             ok, ratio = h_check(P, types, x, st)
             log(f"    planas: segm.tol x{f:.2f}, {len(types)} el., max nuokr./tol = {ratio:.2f}")
             if ratio < best[2]:
                 best = (types, x, ratio)
         log(f"    ĮSPĖJIMAS: tolerancija nepasiekta (max nuokr./tol = {best[2]:.2f}), žr. ataskaitą")
     types, x, ratio = best
-    if st.simplify and ratio <= 1.0 + 1e-6:
-        types, x = simplify_h(P, types, x, st, log)
+    if st.simplify and ratio <= 1.05:
+        if len(types) <= 20:
+            budget = 20.0 if deadline is None else max(0.5, deadline - _time.time())
+            types, x = simplify_h(P, types, x, st, log, budget_s=budget, max_ratio=max(1.0, ratio))
+        else:
+            log(f"    supaprastinimas praleistas: {len(types)} elementų (> 20)")
     return types, x
+
+
+def kink_limit(st):
+    """Didžiausias lūžio kampas (rad), kurį lankas su R >= r_min dar atvaizduoja per toleranciją:
+    R*(1/cos(θ/2) - 1) <= tol."""
+    tol = min(st.tol_line, st.tol_arc)
+    R = max(st.r_min, 1e-3)
+    return 2 * math.acos(R / (R + tol))
+
+
+def _seg_dirs(Q, seg):
+    """Segmento kryptis pradžioje ir pabaigoje."""
+    t, i, j = seg
+    P = Q[i:j + 1]
+    if t == "L":
+        _, _, d = fit_line(P)
+        th = math.atan2(d[1], d[0])
+        return th, th
+    _, cen, _ = fit_circle(P)
+    sg = 1.0 if swept_angle(P, cen) >= 0 else -1.0
+    out = []
+    for q in (P[0], P[-1]):
+        r = (q - cen) / np.linalg.norm(q - cen)
+        tg = sg * np.array([-r[1], r[0]])
+        out.append(math.atan2(tg[1], tg[0]))
+    return out[0], out[1]
+
+
+def split_kinks(P, st):
+    """Skaido liniją lūžiuose, kurių lankas su R >= r_min neatvaizduoja per toleranciją
+    (tangentiška grandinė jų negali turėti). Grąžina dalių sąrašą."""
+    if len(P) < 4:
+        return [P]
+    Q = P[:, :2] - P[0, :2]
+    idx = polyline.simplify(Q, max(st.prethin, min(st.tol_line, st.tol_arc) / 4))
+    Qs = Q[idx]
+    if len(Qs) < 4:
+        return [P]
+    segs = segment(Qs, st.tol_line * 0.8, st.tol_arc * 0.8, st)
+    lim = kink_limit(st)
+    cuts = []
+    dirs = [_seg_dirs(Qs, sg) for sg in segs]
+    for a in range(len(segs) - 1):
+        d = (dirs[a + 1][0] - dirs[a][1] + math.pi) % (2 * math.pi) - math.pi
+        if abs(d) > lim:
+            cuts.append(int(idx[segs[a + 1][1]]))
+    if not cuts:
+        return [P]
+    b = [0] + cuts + [len(P) - 1]
+    return [P[b[k]:b[k + 1] + 1] for k in range(len(b) - 1) if b[k + 1] > b[k]]
 
 
 def trim_chain(el, s_a, s_b):
@@ -583,6 +727,7 @@ class Result:
         Q = P[:, :2] - origin
         self.off, self.sta, self.idx = project(Q, elems)
         self.length = sum(e.L for e in elems)
+        self.note = ""
         self.vprof = vprof
         if vprof is not None:
             S, E, Lc = vprof
@@ -677,7 +822,9 @@ def report(results, path, st, src):
     o.append(f"Šaltinis: {src}   Data: {dt.datetime.now():%Y-%m-%d %H:%M}")
     o.append(f"Planas: tol tiesė {st.tol_line * 1000:.1f} mm, tol lankas {st.tol_arc * 1000:.1f} mm, "
              f"R {st.r_min:g}…{st.r_max:g} m, skaidymo kampas {st.split_angle:g}°")
-    if st.vertical:
+    if st.keep_z:
+        o.append("Profilis: nekeičiamas - aukščiai paimti iš originalių taškų (režimas „tik planas“)")
+    elif st.vertical:
         o.append(f"Profilis: tol {st.v_tol * 1000:.1f} mm, min Δi {st.v_min_dg:g} %, max L {st.v_max_len:g} m")
     for r in results:
         o.append("")
@@ -690,7 +837,9 @@ def report(results, path, st, src):
             Rs = f"{e.R:11.3f}" if e.is_arc else f"{'-':>11}"
             turn = ("kairėn" if e.k > 0 else "dešinėn") if e.is_arc else ""
             o.append(f"{i + 1:>3} {'Lankas' if e.is_arc else 'Tiesė':<6} {e.s0:11.3f} {e.s0 + e.L:11.3f} {e.L:10.3f} {Rs} {turn:>8}")
-        if r.vprof is not None:
+        if r.vprof is not None and st.keep_z:
+            o.append(f"Profilis: aukščiai išlaikyti iš originalių taškų ({len(r.vprof[0])} PVI be kreivių)")
+        elif r.vprof is not None:
             S, E, Lc = r.vprof
             g = np.diff(E) / np.diff(S) * 100
             o.append("Profilis:")
@@ -706,6 +855,8 @@ def report(results, path, st, src):
                     o.append(f"{i:>3} {S[i]:11.3f} {E[i]:10.3f} {gi} {go} {d:7.3f} {Lc[i]:9.3f} {rvs}{mark}")
                 else:
                     o.append(f"{i:>3} {S[i]:11.3f} {E[i]:10.3f} {gi} {go} {'':>7} {'':>9} {'':>10}")
+        if r.note:
+            o.append(f"PASTABA: {r.note}")
         ah = np.abs(r.off)
         o.append("Statistika:")
         o.append(f"  planas:   max {ah.max() * 1000:7.1f} mm ties PK {r.sta[ah.argmax()]:.3f}, vid. {ah.mean() * 1000:6.1f} mm")
@@ -728,10 +879,15 @@ def report(results, path, st, src):
     return "\n".join(o)
 
 
+PLOT_MAX = 12        # PNG grafike - tik tiek ilgiausių alignment'ų (visi - interaktyvioje peržiūroje)
+CHARTS_MAX = 20
+
+
 def plot(results, path):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    results = sorted(results, key=lambda r: -r.length)[:PLOT_MAX]
     n = len(results)
     fig, axs = plt.subplots(n, 3, figsize=(18, 4.5 * n), squeeze=False)
     for row, r in zip(axs, results):
@@ -762,6 +918,18 @@ def plot(results, path):
 
 
 # =====================================================================
+def keep_z_profile(sta, z, merge=0.001):
+    """Profilis iš originalių taškų: PVI kiekvienoje (unikalioje) stotyje, be kreivių -> aukščiai sutampa tiksliai."""
+    o = np.argsort(sta, kind="stable")
+    s, zz = sta[o], z[o]
+    grp = np.r_[0, np.cumsum(np.diff(s) > merge)]
+    S = np.bincount(grp, s) / np.bincount(grp)
+    E = np.bincount(grp, zz) / np.bincount(grp)
+    # paliekami tik profilio lūžiai (aukščio tolerancija 1 mm) - kitur aukštis interpoliuojamas tiksliai
+    keep = polyline.simplify(np.column_stack([S, np.zeros_like(S), E]), 1e9, 0.001)
+    return S[keep], E[keep], np.zeros(len(keep))
+
+
 def process_line(name, layer, P, st, log):
     P = clean_points(P)
     if len(P) < 3:
@@ -769,16 +937,66 @@ def process_line(name, layer, P, st, log):
         return None
     origin = P[0, :2].copy()
     Q = P[:, :2] - origin
-    types, x = fit_horizontal(Q, st, log)
-    el = build_chain(x, types)
-    _, sta, _ = project(Q, el)
-    el = trim_chain(el, float(sta.min()), float(sta.max()))
+    Qfit, st_fit = Q, st
+    if st.prethin > 0 and len(Q) > 50:
+        # pritaikymas ant išretintų taškų su tolerancija, sumažinta retinimo dydžiu:
+        # nuokrypis nuo VISŲ taškų <= (tol - prethin) + prethin = tol
+        idx = polyline.simplify(Q, st.prethin)
+        # grąžinama tiek ORIGINALIŲ viršūnių, kad tarpai būtų <= 2 m (lankas tarp jų „neišsipūs“);
+        # tankinti tiesėmis negalima - išmatuotos kreivės viršūnės yra kreivės taškai, ne atkarpų galai
+        ch = polyline.chainage(Q)
+        extra = [np.searchsorted(ch, np.arange(ch[a_] + 2.0, ch[b_], 2.0)) for a_, b_ in zip(idx[:-1], idx[1:])
+                 if ch[b_] - ch[a_] > 2.0]
+        idx = np.unique(np.concatenate([idx] + extra)) if extra else idx
+        if len(idx) < len(Q):
+            log(f"    išankstinis retinimas: {len(Q)} -> {len(idx)} tšk.")
+            Qfit = Q[idx]
+            st_fit = replace(st, tol_line=st.tol_line - st.prethin, tol_arc=st.tol_arc - st.prethin)
+    Qd = Q
+    note = ""
+    segs0 = segment(Qfit, st_fit.tol_line * 0.8, st_fit.tol_arc * 0.8, st)
+    nseg = len(init_params(Qfit, segs0, max(st.r_min, 0.5))[0])      # su jungiamaisiais lankais
+    Lq = polyline.length(Q)
+    el = None
+    if nseg > IRREG_MIN_EL and Lq / nseg < IRREG_AVG_LEN:
+        note = f"netaisyklinga linija ({nseg} el. po ~{Lq / nseg:.1f} m) - lankai nepritaikyti"
+    else:
+        types, x = fit_horizontal(Qfit, st_fit, log, deadline=_time.time() + PART_BUDGET_S)
+        el = build_chain(x, types)
+        _, sta, _ = project(Q, el)
+        el = trim_chain(el, float(sta.min()), float(sta.max()))
+        off, _, idx = project(Qd, el)
+        ratio = float(np.max(np.abs(off) / h_residual_tol(["A" if e.is_arc else "L" for e in el], idx, st)))
+        Lel = sum(e.L for e in el)
+        sweep = max([abs(e.k * e.L) for e in el if e.is_arc] or [0.0])
+        if ratio > 1.0 + 1e-6:
+            note = f"lankų pritaikyti per toleranciją nepavyko (max nuokr./tol = {ratio:.2f})"
+            el = None
+        elif Lel > 1.05 * Lq + 0.5 or sweep > 1.5 * math.pi:
+            # sveikumo patikra: trasa turi būti ~ tokio pat ilgio kaip linija, lankas - ne kilpa
+            note = (f"lankų pritaikymas nepatikimas (ilgis {Lel:.1f} m vs linijos {Lq:.1f} m, "
+                    f"didžiausias lankas {math.degrees(sweep):.0f}°)")
+            el = None
+    if el is None:
+        # tiesės per tą pačią toleranciją: rezultatas visada teisingas
+        V = Q[polyline.simplify(Q, min(st.tol_line, st.tol_arc))]
+        el, s0 = [], 0.0
+        for a_, b_ in zip(V[:-1], V[1:]):
+            L = float(np.hypot(*(b_ - a_)))
+            if L > 1e-9:
+                el.append(Elem(a_, math.atan2(b_[1] - a_[1], b_[0] - a_[0]), 0.0, L, s0)); s0 += L
+        note += f", supaprastinta tiesėmis ({len(el)} atkarpų)"
+        log(f"    {note}")
     _, sta, _ = project(Q, el)
     vprof = None
-    if st.vertical:
+    if st.keep_z:
+        vprof = keep_z_profile(sta, P[:, 2])
+    elif st.vertical:
         o = np.argsort(sta, kind="stable")
         vprof = fit_vertical(sta[o], P[o, 2], st, log)
-    return Result(name, layer, P, origin, el, vprof, st)
+    r = Result(name, layer, P, origin, el, vprof, st)
+    r.note = note
+    return r
 
 
 def run(inputs, st, out_prefix, name_tpl="{L}", layers=None, make_plot=True, log=print):
@@ -799,15 +1017,52 @@ def run(inputs, st, out_prefix, name_tpl="{L}", layers=None, make_plot=True, log
             log(f"Praleista (nežinomas formatas): {os.path.basename(str(path))}")
     if not lines:
         raise ValueError("Nerasta linijų (DXF LWPOLYLINE/POLYLINE arba CSV x,y,z).")
+    return run_lines(lines, st, out_prefix, name_tpl, make_plot, log,
+                     ", ".join(os.path.basename(str(i)) for i in inputs))
+
+
+PARALLEL = int(os.environ.get("TOOLBOX_PARALLEL", "2"))
+
+
+def _process_task(task, log=None):
+    """Viena linijos dalis (vykdoma ir atskirame procese). Grąžina (Result | None, žurnalo eilutės)."""
+    name, layer, part, st = task
+    logs = []
+    sink = log or logs.append
+    sink(f"{name}: {len(part)} tšk.")
+    r = process_line(name, layer, part, st, sink)
+    return r, logs
+
+
+def run_lines(lines, st, out_prefix, name_tpl="{L}", make_plot=True, log=print, src=""):
+    """lines: [(sluoksnis, id, taškai (n,3))]. Grąžina (results, files)."""
     log(f"Rasta linijų: {len(lines)}")
-    results = []
+    tasks = []
     for layer, h, P in lines:
         P = clean_points(P)
-        parts = split_sharp(P, st.split_angle, 10 * st.tol_line)
+        parts = []
+        for part in split_sharp(P, st.split_angle, 10 * st.tol_line):
+            parts += split_kinks(part, st)
+        if len(parts) > 1:
+            log(f"{layer}_{h}: suskaidyta lūžiuose į {len(parts)} dalis "
+                f"(lūžiai > {math.degrees(kink_limit(st)):.1f}° netelpa į lanką su R ≥ {st.r_min:g} m)")
         for pi, part in enumerate(parts):
-            name = f"{layer}_{h}" + (f"_{pi + 1}" if len(parts) > 1 else "")
-            log(f"{name}: {len(part)} tšk.")
-            r = process_line(name, layer, part, st, log)
+            tasks.append((f"{layer}_{h}" + (f"_{pi + 1}" if len(parts) > 1 else ""), layer, part, st))
+    results = []
+    workers = min(PARALLEL, os.cpu_count() or 1)
+    if workers > 1 and len(tasks) > 4:
+        # linijų dalys nepriklausomos - skaičiuojamos lygiagrečiai visais branduoliais
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(workers, mp_context=mp.get_context("spawn")) as ex:
+            for r, logs in ex.map(_process_task, tasks, chunksize=4):
+                for m in logs:
+                    log(m)
+                if r:
+                    results.append(r)
+    else:
+        for t in tasks:
+            r, logs = _process_task(t, log)
             if r:
                 results.append(r)
     if not results:
@@ -815,7 +1070,7 @@ def run(inputs, st, out_prefix, name_tpl="{L}", layers=None, make_plot=True, log
     files = {"xml": out_prefix + ".xml", "dxf": out_prefix + ".dxf", "report": out_prefix + "_report.txt"}
     write_landxml(results, files["xml"])
     write_dxf(results, files["dxf"], name_tpl)
-    report(results, files["report"], st, ", ".join(os.path.basename(str(i)) for i in inputs))
+    report(results, files["report"], st, src)
     if make_plot:
         files["png"] = out_prefix + ".png"
         plot(results, files["png"])
@@ -838,7 +1093,7 @@ def preview(results):
         joints = np.array([e.p + r.origin for e in r.elems] + [r.elems[-1].end() + r.origin])
         plan.append({
             "name": r.name,
-            "points": np.round(_decimate(r.P[:, :2], 4000), 3).tolist(),
+            "points": np.round(_decimate(r.P[:, :2], max(200, 40000 // len(results))), 3).tolist(),
             "elements": [{"type": "arc" if e.is_arc else "line",
                           "xy": np.round(e.xy(np.linspace(0, e.L, max(2, int(e.L / max(0.5, r.length / 2000)) + 1)))
                                          + r.origin, 3).tolist(),
@@ -860,10 +1115,13 @@ def preview(results):
         summary.append({"Linija": r.name, "Ilgis, m": round(r.length, 3),
                         "Elementų": len(r.elems),
                         "Lankų": sum(e.is_arc for e in r.elems),
-                        "VPI": (len(r.vprof[0]) - 2) if r.vprof is not None else "-",
+                        "VPI": (len(r.vprof[0]) - 2) if (r.vprof is not None and not r.st.keep_z) else "-",
                         "max Δplan, mm": round(float(ah.max()) * 1000, 1),
                         "max Δz, mm": round(float(np.abs(r.dz).max()) * 1000, 1) if r.dz is not None else "-",
                         "Už tol.": int(len(bad))})
+    if len(charts) > CHARTS_MAX:                     # grafikai - tik ilgiausiems
+        top = set(np.argsort([-r.length for r in results])[:CHARTS_MAX])
+        charts = [c for i, c in enumerate(charts) if i in top]
     return {"plan": plan, "charts": charts, "table": summary}
 
 
