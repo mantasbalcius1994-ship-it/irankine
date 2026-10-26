@@ -66,7 +66,7 @@ async def basic_auth(request: Request, call_next):
             except Exception:
                 ok = False
         if not ok:
-            return Response(status_code=401, headers={"WWW-Authenticate": f'Basic realm="{TITLE}"'})
+            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Irankine", charset="UTF-8"'})
     return await call_next(request)
 
 
