@@ -127,6 +127,94 @@ def layers_in(path) -> dict[str, int]:
     return cnt
 
 
+# ------------------------------------------------------------------ linijų keitimas esamame faile
+_COMMON = ("layer", "color", "linetype", "lineweight", "ltscale", "true_color", "transparency", "invisible")
+
+
+@dataclass
+class PolyRef:
+    """Linija esamame DXF dokumente (keičiama vietoje, kiti objektai nepaliečiami)."""
+    entity: object
+    pts: np.ndarray
+    closed: bool
+    has_arcs: bool                  # yra lankų (bulge) - taškai yra išskaidyti lankai
+    layer: str = ""                 # išsaugomas skaitant (objektas vėliau gali būti ištrintas)
+    handle: str = ""
+    verts: np.ndarray | None = None  # tikrosios viršūnės (n,3) - linijoms su lankais
+    bulges: np.ndarray | None = None  # bulge kiekvienai viršūnei (segmentui i -> i+1)
+
+
+def open_doc(path):
+    return _open(path)
+
+
+def polyline_refs(doc, layers=None, flatten=0.002) -> list[PolyRef]:
+    from ezdxf import path as ezpath
+    out = []
+    for e in doc.modelspace():
+        t = e.dxftype()
+        if t not in ("LWPOLYLINE", "POLYLINE") or not _layer_ok(e, layers):
+            continue
+        if t == "POLYLINE" and (e.is_poly_face_mesh or e.is_polygon_mesh):
+            continue
+        verts = bulges = None
+        if t == "LWPOLYLINE":
+            xyb = np.array(e.get_points("xyb"), float).reshape(-1, 3)
+            arcs = bool(np.any(np.abs(xyb[:, 2]) > 1e-12))
+            closed = bool(e.closed)
+            if arcs:
+                verts = np.column_stack([xyb[:, :2], np.full(len(xyb), float(e.dxf.elevation))])
+                bulges = xyb[:, 2]
+        else:
+            arcs = (not e.is_3d_polyline) and any(abs(v.dxf.bulge) > 1e-12 for v in e.vertices)
+            closed = bool(e.is_closed)
+            if arcs:
+                verts = np.array([[v.dxf.location.x, v.dxf.location.y, v.dxf.location.z] for v in e.vertices])
+                bulges = np.array([v.dxf.bulge for v in e.vertices], float)
+        pts = np.array([[v.x, v.y, v.z] for v in ezpath.make_path(e).flattening(flatten)])
+        if closed and len(pts) > 1 and np.linalg.norm(pts[0] - pts[-1]) < 1e-9:
+            pts = pts[:-1]
+        if len(pts) >= 2:
+            out.append(PolyRef(e, pts, closed, arcs, e.dxf.layer, e.dxf.handle, verts, bulges))
+    return out
+
+
+def replace_polyline(doc, ref: PolyRef, pts, closed=None):
+    """Pakeičia linijos geometriją. Pastovus z -> LWPOLYLINE (su elevation), kintamas z -> 3D POLYLINE.
+    Spalva, sluoksnis, linijos tipas išlaikomi."""
+    pts = np.asarray(pts, float)
+    closed = ref.closed if closed is None else closed
+    msp = doc.modelspace()
+    attrs = {k: ref.entity.dxf.get(k) for k in _COMMON if ref.entity.dxf.hasattr(k)}
+    flat = np.ptp(pts[:, 2]) < 1e-9
+    if flat:
+        new = msp.add_lwpolyline([(float(x), float(y)) for x, y in pts[:, :2]], close=closed, dxfattribs=attrs)
+        new.dxf.elevation = float(pts[0, 2])
+    else:
+        new = msp.add_polyline3d([tuple(map(float, p)) for p in pts], dxfattribs=attrs)
+        if closed:
+            new.close(True)
+    msp.delete_entity(ref.entity)
+    return new
+
+
+def replace_polyline_bulged(doc, ref: PolyRef, verts, bulges, closed=None):
+    """Linija su lankais -> LWPOLYLINE su išsaugotais bulge (lankai nepakeisti)."""
+    verts = np.asarray(verts, float)
+    closed = ref.closed if closed is None else closed
+    msp = doc.modelspace()
+    attrs = {k: ref.entity.dxf.get(k) for k in _COMMON if ref.entity.dxf.hasattr(k)}
+    new = msp.add_lwpolyline([(float(x), float(y), float(b)) for (x, y), b in zip(verts[:, :2], bulges)],
+                             format="xyb", close=closed, dxfattribs=attrs)
+    new.dxf.elevation = float(verts[0, 2])
+    msp.delete_entity(ref.entity)
+    return new
+
+
+def delete_entity(doc, ref: PolyRef):
+    doc.modelspace().delete_entity(ref.entity)
+
+
 class DxfWriter:
     """Paprastas DXF rašytojas su sluoksnių spalvomis (ACI)."""
 

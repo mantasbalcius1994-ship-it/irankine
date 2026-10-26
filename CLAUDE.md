@@ -18,8 +18,9 @@ Savininkas: Mantas (kelių inžinerija, TBC). UI ir ataskaitos – lietuviškai.
 
 ## Diegimas
 `main` šaka = produkcija. Serveris (Hetzner 77.42.12.179) kas 2 min. pats pasiima `main` (deploy/update.sh).
-Prieš push: `python tests/test_geo.py && python tests/test_smoke.py && python tests/test_jobs.py`.
+Prieš push: `python tests/test_geo.py && python tests/test_smoke.py && python tests/test_jobs.py && python tests/test_lineclean.py`.
+Vartotojo duomenų failų (DXF, LAZ, IFC) į repozitoriją NEDĖTI - ji vieša.
 
 ## Planas (eilė)
-0. Branduolys + diegimas ✔  1. linefit „tik planas“  2. DXF valymas/supaprastinimas  3. Paviršių palyginimas, tūriai
+0. Branduolys + diegimas ✔  1. linefit „tik planas“ (laukiama kelias_1/3_ali DXF)  2. Linijų valymas ir retinimas ✔  3. Paviršių palyginimas, tūriai
 4. Išpildomųjų taškų kontrolė  5. Ofsetų šablonai, šlaitai  6. IFC → DXF  7. PDF vektoriai / georeferencavimas

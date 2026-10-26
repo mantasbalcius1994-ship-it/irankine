@@ -238,10 +238,18 @@ async function showResults(j) {
     S.preview = await api(`api/jobs/${j.id}/preview`);
     if (S.preview.table?.length) $("#summary").append(table(S.preview.table));
     plan.set(S.preview.plan);
+    setLegend(S.preview.legend);
     drawCharts(S.preview.charts || []);
   }
   $("#results").hidden = false;
   selectTab(S.preview?.plan ? "plan" : "report");
+}
+
+const LEGEND_DEFAULT = [["line", "tiesė"], ["arc", "lankas"], ["pt", "įvesties taškai"], ["bad", "už tolerancijos"]];
+function setLegend(items) {
+  const box = $("#plan-legend");
+  box.replaceChildren(...(items || LEGEND_DEFAULT).map(([k, label]) =>
+    h("span", {}, h("i", { class: `sw sw-${k}` }), label)));
 }
 
 function table(rows) {
@@ -302,14 +310,27 @@ const plan = (() => {
     ctx.clearRect(0, 0, W, H);
     if (!data || !view) return;
     drawScale();
+    // taškai retinami ekrane: piešiamas tik jei nuo ankstesnio nupiešto > minPx (kitaip uždengia linijas)
+    const dots = (arr, minPx, fn) => {
+      let lx = -1e9, ly = -1e9;
+      for (const p of arr) {
+        const [x, y] = toS(p[0], p[1]);
+        if (x < -10 || y < -10 || x > W + 10 || y > H + 10) continue;
+        if (Math.abs(x - lx) < minPx && Math.abs(y - ly) < minPx) continue;
+        lx = x; ly = y; fn(x, y);
+      }
+    };
     ctx.fillStyle = col("--pt-c");
-    for (const a of data) for (const p of a.points) { const [x, y] = toS(p[0], p[1]); ctx.fillRect(x - 1.5, y - 1.5, 3, 3); }
+    for (const a of data) dots(a.points, 4, (x, y) => ctx.fillRect(x - 1.5, y - 1.5, 3, 3));
     for (const a of data) for (const e of a.elements) {
-      path(e.xy); ctx.strokeStyle = e.type === "arc" ? col("--arc-c") : col("--line-c");
+      path(e.xy);
+      ctx.strokeStyle = e.type === "arc" ? col("--arc-c") : e.type === "removed" ? col("--bad-c") : col("--line-c");
+      ctx.setLineDash(e.type === "removed" ? [6, 4] : []);
       ctx.lineWidth = hover?.e === e ? 4 : 2; ctx.stroke();
     }
+    ctx.setLineDash([]);
     ctx.fillStyle = "#fff";
-    for (const a of data) for (const p of a.joints) { const [x, y] = toS(p[0], p[1]); ctx.beginPath(); ctx.arc(x, y, 3, 0, 7); ctx.fill(); }
+    for (const a of data) dots(a.joints, 8, (x, y) => { ctx.beginPath(); ctx.arc(x, y, 2.5, 0, 7); ctx.fill(); });
     ctx.strokeStyle = col("--bad-c"); ctx.lineWidth = 2;
     for (const a of data) for (const p of a.bad) { const [x, y] = toS(p[0], p[1]); ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke(); }
   }
@@ -346,7 +367,9 @@ const plan = (() => {
     if (hit?.e !== hover?.e) { hover = hit; draw(); }
     if (hit) {
       const e = hit.e, n = (v) => v.toLocaleString("lt-LT", { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-      tip.replaceChildren(h("strong", {}, `${e.type === "arc" ? "Lankas" : "Tiesė"}${e.R ? `, R ${n(e.R)} m` : ""}`), h("br"),
+      if (e.label) tip.replaceChildren(h("strong", {}, e.label), e.L != null ? h("br") : null, e.L != null ? `L ${n(e.L)} m` : null,
+        h("br"), h("small", {}, hit.a.name));
+      else tip.replaceChildren(h("strong", {}, `${e.type === "arc" ? "Lankas" : "Tiesė"}${e.R ? `, R ${n(e.R)} m` : ""}`), h("br"),
         `L ${n(e.L)} m, PK ${n(e.s0)} – ${n(e.s0 + e.L)}`, h("br"), h("small", {}, hit.a.name));
       tip.style.left = `${Math.min(sx + 14, W - 230)}px`; tip.style.top = `${sy + 14}px`; tip.hidden = false;
     } else tip.hidden = true;

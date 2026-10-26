@@ -127,6 +127,8 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--navy-2);
 .sw-line { background: var(--line-c); } .sw-arc { background: var(--arc-c); }
 .sw-pt { width: 5px; height: 5px; border-radius: 50%; background: var(--pt-c); }
 .sw-bad { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--bad-c); }
+.sw-removed { background: repeating-linear-gradient(90deg, var(--bad-c) 0 5px, transparent 5px 8px); }
+.sw-joint { width: 6px; height: 6px; border-radius: 50%; background: #fff; }
 .tip { position: absolute; pointer-events: none; background: #fff; color: var(--ink); border-radius: var(--radius-s); padding: 6px 9px; font-size: 13px;
   box-shadow: 0 2px 10px rgba(0,0,0,.35); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .empty { position: absolute; inset: 0; display: grid; place-items: center; color: #8ea2b4; text-align: center; padding: 24px; }

@@ -69,6 +69,130 @@ def rdp(P, tol, use_z=False):
     return np.nonzero(keep)[0]
 
 
+def _span_dev(P, a, b):
+    """Tarpinių viršūnių (a, b) nuokrypiai nuo atkarpos P[a]-P[b]: (plane, aukštyje).
+    Plane - atstumas iki ATKARPOS (ne begalinės tiesės), aukštyje - z skirtumas toje pačioje vietoje."""
+    A, B = P[a, :2], P[b, :2]
+    V = P[a + 1:b, :2] - A
+    d = B - A
+    l2 = float(d @ d)
+    if l2 < 1e-18:
+        t = np.zeros(len(V))
+    else:
+        t = np.clip((V @ d) / l2, 0, 1)
+    dh = np.hypot(*(V - t[:, None] * d).T)
+    if P.shape[1] > 2:
+        dv = np.abs(P[a + 1:b, 2] - (P[a, 2] + t * (P[b, 2] - P[a, 2])))
+    else:
+        dv = np.zeros(len(V))
+    return dh, dv
+
+
+def simplify(P, tol_h, tol_v=None, closed=False):
+    """Viršūnių retinimas (RDP su dviem tolerancijomis). Paliekami ORIGINALŪS taškai (niekas nepastumiama).
+    Garantija: kiekviena pašalinta viršūnė yra ne toliau kaip tol_h plane ir tol_v aukštyje nuo naujos linijos.
+    tol_v=None - aukštis neribojamas (2D). Grąžina paliktų indeksų masyvą."""
+    P = np.asarray(P, float)
+    n = len(P)
+    if n < 3:
+        return np.arange(n)
+    if closed:                                     # uždara: dalijama ties toliausiu nuo pradžios tašku
+        far = int(np.hypot(*(P[:, :2] - P[0, :2]).T).argmax())
+        if far in (0, n - 1):
+            far = n // 2
+        a = simplify(P[:far + 1], tol_h, tol_v)
+        b = simplify(np.vstack([P[far:], P[:1]]), tol_h, tol_v) + far
+        return np.unique(np.r_[a, b[b < n]])
+    use_v = tol_v is not None and P.shape[1] > 2
+    keep = np.zeros(n, bool)
+    keep[[0, -1]] = True
+    stack = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b - a < 2:
+            continue
+        dh, dv = _span_dev(P, a, b)
+        score = dh / tol_h
+        if use_v:
+            score = np.maximum(score, dv / tol_v)
+        i = int(score.argmax())
+        if score[i] > 1.0:
+            m = a + 1 + i
+            keep[m] = True
+            stack += [(a, m), (m, b)]
+    return np.nonzero(keep)[0]
+
+
+def simplify_fixed(P, fixed, tol_h, tol_v=None, closed=False):
+    """Kaip simplify, bet `fixed` viršūnės (pvz. lankų galai) visada paliekamos, o retinamos tik atkarpos tarp jų.
+    Uždarai linijai paskutinė -> pirma atkarpa irgi retinama."""
+    P = np.asarray(P, float)
+    n = len(P)
+    fixed = np.asarray(fixed, bool).copy()
+    if closed:
+        P = np.vstack([P, P[:1]])
+        fixed = np.r_[fixed, fixed[:1]]
+    fixed[[0, -1]] = True
+    F = np.nonzero(fixed)[0]
+    keep = [F]
+    for a, b in zip(F[:-1], F[1:]):
+        if b - a > 1:
+            keep.append(simplify(P[a:b + 1], tol_h, tol_v) + a)
+    k = np.unique(np.concatenate(keep))
+    return k[k < n] if closed else k
+
+
+def deviation(P, keep):
+    """Pašalintų viršūnių nuokrypis nuo supaprastintos linijos: (max plane, max aukštyje)."""
+    P = np.asarray(P, float)
+    mh = mv = 0.0
+    for a, b in zip(keep[:-1], keep[1:]):
+        if b - a > 1:
+            dh, dv = _span_dev(P, a, b)
+            mh, mv = max(mh, float(dh.max())), max(mv, float(dv.max()))
+    return mh, mv
+
+
+def remove_spikes(P, max_len, angle_deg=150.0):
+    """Šuoliai: viršūnė, kur linija staigiai grįžta atgal (posūkis > angle_deg),
+    o bent vienas gretimas segmentas trumpesnis už max_len. Grąžina (naujas P, pašalinta)."""
+    P = np.asarray(P, float)
+    removed = 0
+    changed = True
+    while changed and len(P) > 2:
+        changed = False
+        d = np.abs(deflections(P))
+        ch = np.hypot(*np.diff(P[:, :2], axis=0).T)
+        bad = np.nonzero((d > angle_deg) & (np.minimum(ch[:-1], ch[1:]) <= max_len))[0] + 1
+        if len(bad):
+            keep = np.ones(len(P), bool)
+            keep[bad[::2]] = False                 # gretimus šaliname po vieną, kitas ratas patikrins
+            P = P[keep]
+            removed += int((~keep).sum())
+            changed = True
+    return P, removed
+
+
+def trim_hooks(P, max_len, min_angle=30.0):
+    """Galų „kabliukai“: trumpesnis už max_len paskutinis segmentas, staigiai pasuktas (> min_angle).
+    Grąžina (naujas P, nukirptų viršūnių skaičius)."""
+    P = np.asarray(P, float)
+    cut = 0
+    for _ in range(2):
+        while len(P) > 2:
+            a, b, c = P[0, :2], P[1, :2], P[2, :2]
+            v1, v2 = b - a, c - b
+            if np.hypot(*v1) >= max_len:
+                break
+            ang = abs(math.degrees(math.atan2(v1[0] * v2[1] - v1[1] * v2[0], float(v1 @ v2))))
+            if ang <= min_angle:
+                break
+            P = P[1:]
+            cut += 1
+        P = P[::-1]
+    return P, cut
+
+
 def deflections(P):
     """Plano posūkio kampai viršūnėse (laipsniais, su ženklu: + kairėn). Ilgis n-2."""
     P = np.asarray(P, float)

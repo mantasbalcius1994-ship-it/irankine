@@ -57,7 +57,7 @@ Ribos (`/etc/toolbox.env`, serveriui 2 branduoliai / 4 GB): skaičiuojama po vie
 taškų debesis iki 40 mln. (po retinimo), įkėlimas iki 500 MB. Jei užduotis viršija 3,3 GB, systemd nužudo tik jos
 procesą – užduotis pažymima klaida, eilėje laukusios paleidžiamos iš naujo.
 
-Testai: `python tests/test_geo.py`, `python tests/test_smoke.py`, `python tests/test_jobs.py`.
+Testai: `python tests/test_geo.py`, `python tests/test_smoke.py`, `python tests/test_jobs.py`, `python tests/test_lineclean.py`.
 
 ## Naujas įrankis
 
