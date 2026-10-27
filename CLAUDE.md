@@ -17,7 +17,7 @@ Savininkas: Mantas (kelių inžinerija, TBC). UI ir ataskaitos – lietuviškai.
 - Kiekvienas įrankis tikrinamas su žinomais atsakymais (tests/) ir su vartotojo tikrais failais.
 
 ## Diegimas
-`main` šaka = produkcija. Serveris (Hetzner 77.42.12.179) kas 2 min. pats pasiima `main` (deploy/update.sh).
+`main` šaka = produkcija. Serveris (Hetzner) kas 2 min. pats pasiima `main` (deploy/update.sh).
 Prieš push: `python tests/test_geo.py && python tests/test_smoke.py && python tests/test_jobs.py && python tests/test_lineclean.py`.
 Vartotojo duomenų failų (DXF, LAZ, IFC) į repozitoriją NEDĖTI - ji vieša.
 
