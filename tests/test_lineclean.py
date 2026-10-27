@@ -207,6 +207,51 @@ def test_plan_only_keeps_z():
     assert np.nanmax(np.abs(al.z_at(sta) - D[:, 2])) < 1e-3       # aukščiai išlaikyti (LandXML 4 skaitm.)
 
 
+
+def test_backtracks():
+    """„Ten ir atgal“ ekskursija (IFC/mesh): linija nueina 6 viršūnes į šoną ir grįžta tuo pačiu keliu."""
+    base = np.column_stack([np.arange(0, 30, 1.0), np.zeros(30), np.zeros(30)])
+    out = [base[:15]]
+    arm = np.column_stack([np.full(6, 14.0), np.arange(1, 7, 1.0), np.zeros(6)])
+    out += [arm, arm[-2::-1], [[14.0, 0.0, 0.0]], base[15:]]
+    P = np.vstack(out)
+    Q, br = polyline.remove_backtracks(P, 0.05)
+    assert len(br) == 1 and np.isclose(br[0][-1, 1], 6.0), br
+    assert np.abs(Q[:, 1]).max() < 1e-9 and abs(polyline.length(Q) - 29.0) < 1e-9
+    # tikras kampas ir tankūs taškai posūkyje nelaikomi ekskursija
+    th = np.linspace(0, np.pi, 50)
+    C = np.column_stack([np.cos(th), np.sin(th), np.zeros(50)])
+    assert polyline.remove_backtracks(C, 0.05)[1] == []
+
+
+def test_cli_run():
+    """Komandinė eilutė (skill'ui): run linefit retinti + fiksuotas žingsnis."""
+    import subprocess
+    surf = make_surface()
+    D = drape(surf, road_line())
+    w = io_dxf.DxfWriter()
+    w.polyline3d(D, "BORTAS", 3)
+    f = TMP / "cli.dxf"
+    w.save(f)
+    root = Path(__file__).resolve().parents[1]
+    for extra, name in (([], "tol"), (["--set", "interval=5"], "int")):
+        out = TMP / f"cli_{name}"
+        r = subprocess.run([sys.executable, str(root / "irankine.py"), "run", "linefit", str(f), "--out", str(out),
+                            "--set", "mode=retinti", "--set", "tol_h=10", "--set", "tol_v=5"] + extra,
+                           capture_output=True, text=True, timeout=600)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert (out / "cli_isvalyta.dxf").exists() and (out / "preview.png").exists(), r.stdout
+        Pn = io_dxf.read_polylines(out / "cli_isvalyta.dxf")[0].pts
+        if name == "int":
+            ch = np.diff(polyline.chainage(Pn))
+            assert ch.max() <= 5.0 + 1e-6 and abs(np.median(ch) - 5.0) < 1e-3, ch[:5]   # kas 5 m išilgai linijos
+        else:
+            assert len(Pn) < len(D) * 0.5
+    r = subprocess.run([sys.executable, str(root / "irankine.py"), "run", "linefit", str(f), "--set", "tol_h=-1",
+                        "--out", str(TMP / "cli_bad")], capture_output=True, text=True)
+    assert r.returncode == 2 and "mažiausia" in r.stdout, r.stdout
+
+
 if __name__ == "__main__":
     fns = [v for k, v in dict(globals()).items() if k.startswith("test_")]
     for fn in fns:

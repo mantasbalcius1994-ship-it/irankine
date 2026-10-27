@@ -94,11 +94,12 @@ class JobContext:
     progress: Callable[[float], None]
     outputs: list[Output] = field(default_factory=list)
     preview: dict | None = None
+    out_dir: Path | None = None     # CLI: rezultatai tiesiai į nurodytą katalogą
 
     @property
     def outdir(self) -> Path:
-        d = self.workdir / "out"
-        d.mkdir(exist_ok=True)
+        d = self.out_dir or (self.workdir / "out")
+        d.mkdir(parents=True, exist_ok=True)
         return d
 
     def add_output(self, path, label, kind="file"):

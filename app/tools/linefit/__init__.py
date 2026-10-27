@@ -40,6 +40,8 @@ class LineFit(Tool):
         Param("tol_h", "Max nuokrypis plane", "float", 10.0, "mm", "Retinimas", min=0.1, show_if="mode=retinti"),
         Param("tol_v", "Max nuokrypis aukštyje", "float", 5.0, "mm", "Retinimas", min=0.0, show_if="mode=retinti",
               help="0 = aukščių profilis išlaikomas tiksliai."),
+        Param("interval", "Fiksuotas žingsnis", "float", 0.0, "m", "Retinimas", min=0.0, show_if="mode=retinti",
+              help="0 = retinama pagal toleranciją (forma išlaikoma). >0 = taškas kas N m (forma - apytiksliai)."),
         # planas
         Param("h_tol_line", "Max nuokrypis (tiesė)", "float", 20.0, "mm", "Planas", min=0.1, step=1, show_if=FIT),
         Param("h_tol_arc", "Max nuokrypis (lankas)", "float", 20.0, "mm", "Planas", min=0.1, step=1, show_if=FIT),
@@ -58,8 +60,10 @@ class LineFit(Tool):
               help="Aštrūs profilio lūžiai paliekami be parabolės. 0 = išjungta."),
         # valymas
         Param("spikes", "Šalinti šuolius", "bool", True, group="Valymas",
-              help="Viršūnė, kur linija staigiai grįžta atgal (posūkis > 150°)."),
+              help="Viršūnė, kur linija staigiai grįžta atgal (posūkis > 150°), ir „ten ir atgal“ ekskursijos."),
         Param("spike_len", "Šuolio max ilgis", "float", 0.5, "m", "Valymas", min=0.001, enabled_by="spikes"),
+        Param("spike_tol", "„Ten ir atgal“ tolerancija", "float", 50.0, "mm", "Valymas", min=1, enabled_by="spikes",
+              help="Ekskursija, kai linija grįžta tuo pačiu keliu (IFC/mesh). Šakos - į sluoksnį *_SPIKE."),
         Param("hooks", "Kirpti galų kabliukus", "bool", True, group="Valymas",
               help="Trumpas, staigiai pasuktas paskutinis segmentas (> 30°)."),
         Param("hook_len", "Kabliuko max ilgis", "float", 20.0, "mm", "Valymas", min=0.1, enabled_by="hooks"),
@@ -96,7 +100,7 @@ class LineFit(Tool):
             if src.suffix.lower() == ".dxf":
                 doc, refs = clean.open_refs(src, layers, ctx.log)
                 _, S = clean.new_stats()
-                work, _, _ = clean.prepare(doc, refs, p, S, ctx.log)
+                work, _, _, _ = clean.prepare(doc, refs, p, S, ctx.log)
                 for r, P in work:
                     if isinstance(P, str):
                         continue

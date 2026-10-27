@@ -26,10 +26,11 @@ def new_stats():
 
 
 def prepare(doc, refs, p, S, log):
-    """Valymas (šuoliai, kabliukai, dublikatai, sujungimas). Grąžina (work, marks, removed_xy):
+    """Valymas (šuoliai, kabliukai, dublikatai, sujungimas). Grąžina (work, marks, removed_xy, branches):
     work = [[ref, P | None (su lankais) | "deleted"]]."""
     work = []                                  # [ref, P]
     marks = []                                 # vietos peržiūrai (šuoliai, kabliukai, sujungimai)
+    branches = []                              # pašalintos „ten ir atgal“ šakos (sluoksnis, taškai) - patikrai
     for r in refs:
         s = S(r.layer)
         s["lines0"] += 1; s["v0"] += len(r.verts) if r.has_arcs else len(r.pts)
@@ -39,6 +40,11 @@ def prepare(doc, refs, p, S, log):
             continue
         P = polyline.dedupe(r.pts, 1e-6)
         if p["spikes"]:
+            P, br = polyline.remove_backtracks(P, p.get("spike_tol", 50.0) / 1000)
+            if br:                                 # „ten ir atgal“ ekskursijos (IFC/mesh)
+                s["spikes"] += len(br)
+                branches += [(r.layer, b_) for b_ in br]
+                marks += [b_[-1, :2].tolist() for b_ in br]
             P0 = P
             P, k = polyline.remove_spikes(P, p["spike_len"])
             if k:
@@ -86,7 +92,7 @@ def prepare(doc, refs, p, S, log):
             S(work[first][0].layer)["joins"] += len(ch) - 1
             njoin += len(ch) - 1
         log(f"  sujungta galų: {njoin}")
-    return work, marks, removed_xy
+    return work, marks, removed_xy, branches
 
 
 def run_simplify(ctx, p, layers):
@@ -94,13 +100,14 @@ def run_simplify(ctx, p, layers):
     tol_h = p["tol_h"] / 1000
     tol_v = max(p["tol_v"] / 1000, 1e-9)
     total = {}
-    plan_items, rows = [], []
+    plan_items, rows, profiles = [], [], []
     for src in ctx.inputs["files"]:
         if src.suffix.lower() != ".dxf":
             raise ValueError(f"{src.name}: retinimo režimui reikia DXF failo")
         doc, refs = open_refs(src, layers, ctx.log)
         st, S = new_stats()
-        work, marks, removed_xy = prepare(doc, refs, p, S, ctx.log)
+        work, marks, removed_xy, branches = prepare(doc, refs, p, S, ctx.log)
+        interval = float(p.get("interval") or 0.0)
         out_lines = []
         for r, P in work:
             s = S(r.layer)
@@ -124,11 +131,19 @@ def run_simplify(ctx, p, layers):
             if len(P) < 2:
                 io_dxf.delete_entity(doc, r)
                 continue
-            keep = polyline.simplify(P, tol_h, tol_v, closed=r.closed)
-            dh, dv = polyline.deviation(np.vstack([P, P[:1]]) if r.closed else P,
-                                        np.r_[keep, len(P)] if r.closed else keep)
+            if interval > 0:                       # fiksuotas žingsnis (forma tiksliai neišlaikoma)
+                Pc = np.vstack([P, P[:1]]) if r.closed else P
+                newP = polyline.resample(Pc, interval)
+                if r.closed:
+                    newP = newP[:-1]
+                dh, dv = _deviation_to(P, newP, r.closed)
+            else:
+                keep = polyline.simplify(P, tol_h, tol_v, closed=r.closed)
+                dh, dv = polyline.deviation(np.vstack([P, P[:1]]) if r.closed else P,
+                                            np.r_[keep, len(P)] if r.closed else keep)
+                newP = P[keep]
             s["dh"], s["dv"] = max(s["dh"], dh), max(s["dv"], dv)
-            newP = P[keep]
+            profiles.append((r.layer, P, newP))
             layer = r.layer
             new = io_dxf.replace_polyline(doc, r, newP)
             s["lines1"] += 1; s["v1"] += len(newP)
@@ -136,6 +151,10 @@ def run_simplify(ctx, p, layers):
             rows.append({"file": src.name, "layer": layer, "handle": new.dxf.handle,
                          "v0": len(r.pts), "v1": len(newP), "len": polyline.length(newP)})
 
+        for lay, br in branches:                    # šakos patikrai - atskirame sluoksnyje
+            io_dxf.add_polyline3d(doc, br, f"{lay}_SPIKE", 1)
+        if branches:
+            ctx.log(f"  „ten ir atgal“ šakų: {len(branches)} -> sluoksniai *_SPIKE (peržiūrėkite ir ištrinkite)")
         out = ctx.outdir / f"{src.stem}_isvalyta.dxf"
         doc.saveas(out)
         ctx.add_output(out, f"Išvalytas DXF ({src.name})")
@@ -148,7 +167,7 @@ def run_simplify(ctx, p, layers):
     xlsx = ctx.outdir / "ataskaita.xlsx"
     _write_report(xlsx, total, rows, p)
     ctx.add_output(xlsx, "Ataskaita (Excel)")
-    ctx.preview = {"plan": plan_items, "charts": [],
+    ctx.preview = {"plan": plan_items, "charts": _dz_charts(profiles, p),
                    "legend": [["line", "išvalyta linija"], ["joint", "likusios viršūnės"],
                               ["pt", "pradinės viršūnės"], ["removed", "pašalintas dublikatas"],
                               ["bad", "šuolys / kabliukas / sujungimas"]],
@@ -160,6 +179,34 @@ def run_simplify(ctx, p, layers):
          "max Δplan, mm": round(v["dh"] * 1000, 1), "max Δz, mm": round(v["dv"] * 1000, 1)}
         for (f, lay), v in total.items()]}
     ctx.log("Baigta")
+
+
+def _deviation_to(P, Q, closed=False):
+    """Originalių viršūnių P atstumas iki linijos Q: (max plane, max aukštyje)."""
+    import shapely
+    Qc = np.vstack([Q, Q[:1]]) if closed else Q
+    g = shapely.LineString(Qc[:, :2])
+    d = shapely.distance(shapely.points(P[:, :2]), g)
+    s_ = shapely.line_locate_point(g, shapely.points(P[:, :2]))
+    zq = np.interp(s_, polyline.chainage(Qc), Qc[:, 2])
+    return float(d.max()), float(np.abs(P[:, 2] - zq).max())
+
+
+def _dz_charts(profiles, p, nmax=3):
+    """Δz išilgai linijos (originalios viršūnės - nauja linija) ilgiausioms nelygioms 3D linijoms."""
+    import shapely
+    cand = [(polyline.length(P), lay, P, Q) for lay, P, Q in profiles if np.ptp(P[:, 2]) > 1e-6]
+    out = []
+    for L, lay, P, Q in sorted(cand, key=lambda c: -c[0])[:nmax]:
+        g = shapely.LineString(Q[:, :2])
+        s_ = shapely.line_locate_point(g, shapely.points(P[:, :2]))
+        dz = (P[:, 2] - np.interp(s_, polyline.chainage(Q), Q[:, 2])) * 1000
+        x = polyline.chainage(P)
+        k = np.linspace(0, len(x) - 1, min(len(x), 3000)).astype(int)
+        out.append({"title": f"{lay}: {len(P)} → {len(Q)} viršūnių, {L:.0f} m", "x": np.round(x[k], 3).tolist(),
+                    "series": [{"name": "Δz, mm", "y": np.round(dz[k], 2).tolist(), "tol": p["tol_v"]}],
+                    "vlines": []})
+    return out
 
 
 def _match(P0, P):

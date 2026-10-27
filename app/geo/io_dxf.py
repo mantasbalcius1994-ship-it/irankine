@@ -211,6 +211,16 @@ def replace_polyline_bulged(doc, ref: PolyRef, verts, bulges, closed=None):
     return new
 
 
+def add_polyline3d(doc, pts, layer, color=None):
+    """Nauja 3D polilinija esamame dokumente (sluoksnis sukuriamas, jei nėra)."""
+    if layer not in doc.layers:
+        doc.layers.add(layer, color=color or 7)
+    a = {"layer": layer}
+    if color is not None:
+        a["color"] = color
+    return doc.modelspace().add_polyline3d([tuple(map(float, q)) for q in np.asarray(pts)[:, :3]], dxfattribs=a)
+
+
 def delete_entity(doc, ref: PolyRef):
     doc.modelspace().delete_entity(ref.entity)
 

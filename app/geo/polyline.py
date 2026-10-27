@@ -173,6 +173,58 @@ def remove_spikes(P, max_len, angle_deg=150.0):
     return P, removed
 
 
+def remove_backtracks(P, tol=0.05, min_run=3):
+    """„Ten ir atgal“ ekskursijos (dažnos IFC/mesh lūžio linijose): linija nueina iki taško ir grįžta tuo pačiu
+    keliu. Aptinkama palindromu: viršūnių poros (i, j), |i-j| > 3, atstumas < tol, grupuojamos pagal i+j;
+    grupė su >= min_run porų = ekskursija. Pavienė pašalinama paliekant bazinį tašką (šaka grąžinama
+    patikrai); dvi gretimos su bendru apex sujungiamos per apex.
+    Grąžina (naujas P, šakų sąrašas [(n,3) masyvai])."""
+    from collections import defaultdict
+    from scipy.spatial import cKDTree
+    P = np.asarray(P, float)
+    n = len(P)
+    if n < 2 * min_run + 3:
+        return P, []
+    groups = defaultdict(list)
+    for i, j in cKDTree(P[:, :2]).query_pairs(tol):
+        if abs(i - j) > 3:
+            groups[i + j].append((min(i, j), max(i, j)))
+    sp = sorted(({"s": min(p[0] for p in g), "e": max(p[1] for p in g), "apex": k // 2}
+                 for k, g in groups.items() if len(g) >= min_run), key=lambda d: d["s"])
+    # persidengiančios grupės (tas pats artefaktas) - paliekama plačiausia
+    spikes = []
+    for d in sp:
+        if spikes and d["s"] <= spikes[-1]["e"]:
+            if d["e"] - d["s"] > spikes[-1]["e"] - spikes[-1]["s"]:
+                spikes[-1] = d
+            continue
+        spikes.append(d)
+    if not spikes:
+        return P, []
+    ranges, branches, used = [], [], [False] * len(spikes)
+    for a, A in enumerate(spikes):
+        if used[a]:
+            continue
+        B = next((b for b in range(a + 1, len(spikes)) if not used[b]
+                  and spikes[b]["s"] - A["e"] <= 2
+                  and np.hypot(*(P[A["apex"], :2] - P[spikes[b]["apex"], :2])) < tol), None)
+        if B is not None:                           # dvi ekskursijos su bendru apex - sujungiama per jį
+            used[B] = True
+            Bd = spikes[B]
+            seg = np.vstack([P[A["s"]:A["apex"] + 1], P[Bd["apex"] - 1:Bd["s"] - 1:-1]])
+            ranges.append((A["s"], Bd["e"], seg))
+        else:                                       # pavienė - lieka bazinis taškas, šaka atiduodama patikrai
+            ranges.append((A["s"], A["e"], P[A["s"]:A["s"] + 1]))
+            branches.append(P[A["s"]:A["apex"] + 1].copy())
+    out, cur = [], 0
+    for s, e, seg in sorted(ranges, key=lambda r: r[0]):
+        if s < cur:
+            continue
+        out.append(P[cur:s]); out.append(seg); cur = e + 1
+    out.append(P[cur:])
+    return np.vstack([o for o in out if len(o)]), branches
+
+
 def trim_hooks(P, max_len, min_angle=30.0):
     """Galų „kabliukai“: trumpesnis už max_len paskutinis segmentas, staigiai pasuktas (> min_angle).
     Grąžina (naujas P, nukirptų viršūnių skaičius)."""
