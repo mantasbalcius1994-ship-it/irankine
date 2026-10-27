@@ -279,3 +279,51 @@ def project_point(P, q):
     s = chainage(P)
     side = d[i, 0] * (q - A[i])[1] - d[i, 1] * (q - A[i])[0]
     return s[i] + t[i] * math.sqrt(l2[i]), -math.copysign(dist[i], side) if side else 0.0, i
+
+
+def station_offset(P, Q, chunk=20_000):
+    """Daug taškų -> (atstumas išilgai, atstumas statmenai [+ dešinėje]) linijos P atžvilgiu. Vektorizuota."""
+    P = np.asarray(P, float)[:, :2]
+    Q = np.atleast_2d(np.asarray(Q, float))[:, :2]
+    A, d = P[:-1], np.diff(P, axis=0)
+    l2 = np.maximum((d ** 2).sum(1), 1e-18)
+    s0 = chainage(P)[:-1]
+    st, of = np.empty(len(Q)), np.empty(len(Q))
+    for i in range(0, len(Q), chunk):
+        q = Q[i:i + chunk, None, :] - A[None]                      # (n,m,2)
+        t = np.clip((q * d).sum(2) / l2, 0, 1)
+        r = q - t[..., None] * d
+        k = (r ** 2).sum(2).argmin(1)
+        j = np.arange(len(k))
+        st[i:i + chunk] = s0[k] + t[j, k] * np.sqrt(l2[k])
+        cr = d[k, 0] * q[j, k, 1] - d[k, 1] * q[j, k, 0]           # > 0 - kairėje
+        of[i:i + chunk] = -np.sign(cr) * np.hypot(*r[j, k].T)
+    return st, of
+
+
+def centerline(XY, seg=5.0, smooth=3):
+    """Ilgo siauro taškų rinkinio (pylimas, griovys, juosta) vidurio linija: medianos ruožais išilgai,
+    2 iteracijos (lenktiems objektams). Kryptis - į šiaurę (arba rytus)."""
+    XY = np.asarray(XY, float)[:, :2]
+    c = XY.mean(0)
+    _, _, vt = np.linalg.svd(XY - c, full_matrices=False)
+    a = vt[0] if (vt[0][1] > 0 or (vt[0][1] == 0 and vt[0][0] > 0)) else -vt[0]
+    st = (XY - c) @ a
+    P = np.array([c + a * st.min(), c + a * st.max()])
+    for _ in range(2):
+        L = chainage(P)[-1]
+        n = max(2, int(np.ceil(L / seg)))
+        s, _o = station_offset(P, XY)
+        b = np.minimum((s / L * n).astype(int), n - 1)
+        pts = [np.median(XY[b == k], 0) for k in range(n) if (b == k).sum() >= 3]
+        if len(pts) < 2:
+            break
+        C = np.array(pts)
+        if smooth > 1 and len(C) > smooth:
+            ker = np.ones(smooth) / smooth
+            Cs = np.column_stack([np.convolve(np.pad(C[:, k], smooth // 2, mode="edge"), ker, "valid") for k in (0, 1)])
+            C = Cs
+        u0 = (C[1] - C[0]) / max(np.hypot(*(C[1] - C[0])), 1e-9)
+        u1 = (C[-1] - C[-2]) / max(np.hypot(*(C[-1] - C[-2])), 1e-9)
+        P = np.vstack([C[0] - u0 * seg, C, C[-1] + u1 * seg])          # pratęsimas, kad apimtų galus
+    return P

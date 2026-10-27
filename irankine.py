@@ -4,6 +4,7 @@
   python irankine.py tools                                  įrankiai ir jų parametrai
   python irankine.py info failas.dxf [kitas.xml ...]         failo turinys (sluoksniai, linijos, viršūnės, ...)
   python irankine.py run linefit failas.dxf --set mode=retinti --set tol_h=10 --out rezultatai
+  python irankine.py run pavirsiai design=projektas.ttm scan=skenas.laz --out rezultatai
 
 Parametrų vienetai - kaip formoje (mm / m / ° / %), žr. `tools`. Rezultatai: <out>/ (failai, preview.png,
 preview.json, log.txt). Išėjimo kodas 0 - pavyko, 2 - vartotojo klaida (pranešimas lietuviškai).
@@ -22,6 +23,8 @@ def cmd_tools(_):
     from app.core.registry import discover
     for t in discover().values():
         print(f"\n== {t.id}: {t.title}\n   {t.description}")
+        if len(t.inputs) > 1:
+            print("   įvestys: " + ", ".join(f"{i.key}=<{i.label}>" for i in t.inputs))
         for p in t.params:
             unit = f" {p.unit}" if p.unit else ""
             extra = []
@@ -91,6 +94,15 @@ def cmd_info(a):
                                       f"profilis {'yra' if o.profile is not None else 'nėra'}")
                     except ValueError:
                         pass
+            elif ext == ".ttm":
+                from app.geo import io_ttm
+                from app.geo.surface import Surface
+                d = io_ttm.read(f)
+                S = Surface(d["pts"], d["tris"], d["name"])
+                P = d["pts"]
+                print(f"  paviršius {d['name']}: {len(P)} tšk., {len(d['tris'])} trikampių, plotas {S.area_2d():.1f} m²")
+                print(f"  E {P[:, 0].min():.3f}…{P[:, 0].max():.3f}, N {P[:, 1].min():.3f}…{P[:, 1].max():.3f}, "
+                      f"Z {P[:, 2].min():.3f}…{P[:, 2].max():.3f}")
             elif ext in (".las", ".laz"):
                 from app.geo import io_las
                 for k, v in io_las.info(f).items():
@@ -151,6 +163,39 @@ def render_preview(prev, path):
     return path
 
 
+def _assign_inputs(tool, args):
+    """Failai -> įrankio įvestys. `raktas=failas` - aiškiai; kitaip pagal eilę (vienas failas vienai įvesčiai,
+    paskutinė „multiple“ įvestis pasiima likusius)."""
+    specs = tool.inputs or []
+    if not specs:
+        return {"files": [Path(f).resolve() for f in args]}
+    keys = {s.key for s in specs}
+    res, rest = {}, []
+    for f in args:
+        k, sep, v = f.partition("=")
+        if sep and k in keys:
+            res.setdefault(k, []).append(Path(v).resolve())
+        else:
+            rest.append(Path(f).resolve())
+    free = [s for s in specs if s.key not in res]
+    for i, s in enumerate(free):
+        if not rest:
+            break
+        if s.multiple and i == len(free) - 1:
+            res[s.key] = rest; rest = []
+        else:
+            res[s.key] = [rest.pop(0)]
+    if rest:
+        sys.exit(f"Per daug failų. Įvestys: " + ", ".join(f"{s.key} ({s.label})" for s in specs))
+    for s in specs:
+        if s.required and not res.get(s.key):
+            sys.exit(f"Trūksta įvesties „{s.key}“ ({s.label}). Nurodykite: {s.key}=<failas>")
+        for f in res.get(s.key, []):
+            if not f.exists():
+                sys.exit(f"Failas nerastas: {f}")
+    return res
+
+
 def cmd_run(a):
     from app.core.registry import discover
     from app.core.tool import JobContext
@@ -174,12 +219,8 @@ def cmd_run(a):
 
     def log(m):
         print(m, flush=True); logf.write(m + "\n")
-    files = [Path(f).resolve() for f in a.files]
-    for f in files:
-        if not f.exists():
-            sys.exit(f"Failas nerastas: {f}")
-    key = tool.inputs[0].key if tool.inputs else "files"
-    ctx = JobContext("cli", out, {key: files}, params, log, lambda v: None, out_dir=out)
+    inputs = _assign_inputs(tool, a.files)
+    ctx = JobContext("cli", out, inputs, params, log, lambda v: None, out_dir=out)
     t0 = time.time()
     try:
         tool.run(ctx)
@@ -188,7 +229,7 @@ def cmd_run(a):
     log(f"Laikas: {time.time() - t0:.1f} s")
     if ctx.preview:
         (out / "preview.json").write_text(json.dumps(ctx.preview, ensure_ascii=False), encoding="utf-8")
-        png = render_preview(ctx.preview, out / "preview.png")
+        png = (out / ctx.preview["image"]) if ctx.preview.get("image") else render_preview(ctx.preview, out / "preview.png")
         tab = ctx.preview.get("table") or []
         if tab:
             log("\nSUVESTINĖ")
@@ -201,7 +242,7 @@ def cmd_run(a):
     log("\nREZULTATAI")
     for o in ctx.outputs:
         log(f"  {out / o.name}  - {o.label}")
-    if ctx.preview:
+    if ctx.preview and not ctx.preview.get("image"):
         log(f"  {out / 'preview.png'}  - peržiūra (planas, grafikai)")
 
 

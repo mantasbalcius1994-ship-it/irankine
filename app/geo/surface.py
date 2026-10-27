@@ -85,6 +85,31 @@ class Surface:
                 out[i:i + chunk][m] = (w * z).sum(1)
         return out
 
+    def tri_at(self, xy):
+        """Trikampio indeksas taškuose (už ribų -1)."""
+        xy = np.atleast_2d(np.asarray(xy, float))[:, :2]
+        c = max(np.ptp(xy[:, 0]), np.ptp(xy[:, 1]), 1e-9) / 512
+        o = np.lexsort((np.floor(xy[:, 0] / c), np.floor(xy[:, 1] / c)))
+        out = np.full(len(xy), -1)
+        for i in range(0, len(xy), 500_000):
+            oo = o[i:i + 500_000]
+            out[oo] = self._locate(xy[oo] - self.origin)
+        return out
+
+    def tri_slopes(self):
+        """Trikampių nuolydis (tan, 0.1 = 10 %)."""
+        P, T = self.pts, self.tris
+        n = np.cross(P[T[:, 1]] - P[T[:, 0]], P[T[:, 2]] - P[T[:, 0]])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.hypot(n[:, 0], n[:, 1]) / np.abs(n[:, 2])
+
+    def slope_at(self, xy):
+        """Paviršiaus nuolydis taškuose (tan); už ribų NaN."""
+        ti = self.tri_at(xy)
+        out = np.full(len(ti), np.nan)
+        out[ti >= 0] = self.tri_slopes()[ti[ti >= 0]]
+        return out
+
     # ------------------------------------------------------------ geometrija
     def boundary(self) -> list[np.ndarray]:
         """Išoriniai kraštai kaip uždari žiedai (XY)."""
@@ -303,3 +328,82 @@ class _GridLocator:
             j += 1
             todo = todo[~hit & (n[todo] > j)]
         return out
+
+
+# ------------------------------------------------------------------ zonos (išplovos / sankaupos)
+@dataclass
+class Zone:
+    id: int
+    sign: int                 # -1 = žemiau (išplova, iškasa), +1 = aukščiau (sankaupa)
+    cells: int
+    area: float               # m²
+    volume: float             # m³ (|dz| suma zonoje)
+    max_dz: float             # didžiausias |dz|, m
+    mean_dz: float
+    xy_max: tuple             # giliausios vietos XY
+    centroid: tuple
+    rings: list               # [išorė, skylės...] XY masyvai
+    name: str = ""
+
+
+def find_zones(dz: Grid, thr: float, min_area=0.0, sign=-1, connect8=True, smooth=True) -> list[Zone]:
+    """Ištisinės tinklelio sritys, kur dz < -thr (sign=-1) arba dz > thr (sign=+1).
+    Kontūras - langelių sąjunga (supaprastinta ½ langelio); tūris - |dz| suma zonoje."""
+    import shapely
+    from scipy import ndimage
+    d = dz.z * sign
+    m = np.nan_to_num(d, nan=-np.inf) > thr
+    st = np.ones((3, 3), bool) if connect8 else None
+    lab, n = ndimage.label(m, structure=st)
+    if not n:
+        return []
+    A, s = dz.cell_area, dz.step
+    idx = np.arange(1, n + 1)
+    cnt = ndimage.sum(m, lab, idx)
+    vol = ndimage.sum(np.where(m, d, 0), lab, idx) * A
+    mx = ndimage.maximum(np.where(m, d, 0), lab, idx)
+    arg = ndimage.maximum_position(np.where(m, d, 0), lab, idx)
+    objs = ndimage.find_objects(lab)
+    out = []
+    for k in range(n):
+        if cnt[k] * A < min_area:
+            continue
+        sl = objs[k]
+        iy, ix = np.nonzero(lab[sl] == k + 1)
+        iy, ix = iy + sl[0].start, ix + sl[1].start
+        x = dz.x0 + ix * s
+        y = dz.y0 + iy * s
+        geom = shapely.union_all(shapely.box(x - s / 2, y - s / 2, x + s / 2, y + s / 2))
+        if smooth:
+            geom = geom.simplify(s * 0.5)
+        polys = list(getattr(geom, "geoms", [geom]))
+        poly = max(polys, key=lambda g: g.area)
+        rings = [np.asarray(poly.exterior.coords)] + [np.asarray(r.coords) for r in poly.interiors]
+        py, px = arg[k]
+        out.append(Zone(0, sign, int(cnt[k]), float(cnt[k] * A), float(vol[k]), float(mx[k]),
+                        float(vol[k] / (cnt[k] * A)), (dz.x0 + px * s, dz.y0 + py * s),
+                        (float(x.mean()), float(y.mean())), rings))
+    out.sort(key=lambda z: -z.volume)
+    for i, z in enumerate(out, 1):
+        z.id = i
+    return out
+
+
+def save_raster(grid: Grid, path, vmin, vmax, cmap="RdBu"):
+    """Spalvotas tinklelis -> PNG + pasaulio failas (.pgw), įkeliamas į TBC / CAD kaip georeferencuotas vaizdas.
+    NaN - permatoma. Grąžina (png, pgw)."""
+    import matplotlib
+    matplotlib.use("Agg")
+    from matplotlib import colormaps
+    from pathlib import Path
+    z = grid.z[::-1]                                    # 0 eilutė = viršus (max Y)
+    t = np.clip((z - vmin) / (vmax - vmin), 0, 1)
+    rgba = colormaps[cmap](np.nan_to_num(t, nan=0.5))
+    rgba[np.isnan(z), 3] = 0
+    import matplotlib.pyplot as plt
+    p = Path(path)
+    plt.imsave(p, rgba)
+    ny = grid.z.shape[0]
+    pgw = p.with_suffix(".pgw")
+    pgw.write_text(f"{grid.step:.6f}\n0\n0\n{-grid.step:.6f}\n{grid.x0:.4f}\n{grid.y0 + (ny - 1) * grid.step:.4f}\n")
+    return p, pgw

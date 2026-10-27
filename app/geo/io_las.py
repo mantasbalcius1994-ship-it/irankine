@@ -8,9 +8,15 @@ def info(path) -> dict:
     import laspy
     with laspy.open(str(path)) as f:
         h = f.header
+        try:                                         # CRS (reikia pyproj - nebūtina)
+            crs = h.parse_crs()
+            crs = crs.name if crs else None
+        except Exception:
+            crs = next((v.description or type(v).__name__ for v in h.vlrs if "Wkt" in type(v).__name__
+                        or "GeoKey" in type(v).__name__), None)
         return {"points": int(h.point_count), "version": str(h.version), "format": int(h.point_format.id),
-                "min": tuple(h.mins), "max": tuple(h.maxs), "scale": tuple(h.scales),
-                "crs": (h.parse_crs().name if h.parse_crs() else None) if hasattr(h, "parse_crs") else None}
+                "min": tuple(round(float(v), 3) for v in h.mins), "max": tuple(round(float(v), 3) for v in h.maxs),
+                "scale": tuple(float(v) for v in h.scales), "crs": crs}
 
 
 def read(path, bounds=None, polygon=None, classes=None, thin=None, thin_mode="min",

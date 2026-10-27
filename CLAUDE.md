@@ -18,7 +18,7 @@ Savininkas: Mantas (kelių inžinerija, TBC). UI ir ataskaitos – lietuviškai.
 
 ## Diegimas
 `main` šaka = produkcija. Serveris (Hetzner) kas 2 min. pats pasiima `main` (deploy/update.sh).
-Prieš push: `python tests/test_geo.py && python tests/test_smoke.py && python tests/test_jobs.py && python tests/test_lineclean.py`.
+Prieš push: `python tests/test_geo.py && python tests/test_smoke.py && python tests/test_jobs.py && python tests/test_lineclean.py && python tests/test_pavirsiai.py`.
 Vartotojo duomenų failų (DXF, LAZ, IFC) į repozitoriją NEDĖTI - ji vieša.
 
 ## Naudojimas per Claude skill „irankine“
@@ -26,5 +26,5 @@ Pagrindinis naudojimo būdas - skill: klonuoja šią repozitoriją ir leidžia `
 Nauji įrankiai `app/tools/` automatiškai pasiekiami ir CLI, ir svetainėje. Serveris - nebūtinas.
 
 ## Planas (eilė)
-0. Branduolys + diegimas ✔  1-2. linefit: režimai retinti / lankai / tik planas + valymas ✔ (laukiama tikrų bortų DXF patikrai)  3. Paviršių palyginimas, tūriai
+0. Branduolys + diegimas ✔  1-2. linefit: režimai retinti / lankai / tik planas + valymas ✔ (laukiama tikrų bortų DXF patikrai)  3. pavirsiai: palyginimas, tūriai, išplovų zonos ✔ (pritaikymas tik lygiose vietose - šlaituose išplovos)
 4. Išpildomųjų taškų kontrolė  5. Ofsetų šablonai, šlaitai  6. IFC → DXF  7. PDF vektoriai / georeferencavimas
