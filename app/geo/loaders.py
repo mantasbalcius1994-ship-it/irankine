@@ -60,3 +60,32 @@ def load_points(path, thin=None, bounds=None, log=None) -> tuple[np.ndarray | No
     if ext in (".ttm", ".xml"):
         return None, load_surface(p)
     raise ValueError(f"{p.name}: nepalaikomas formatas (tinka LAS/LAZ, CSV, DXF, TTM, LandXML)")
+
+
+def load_surfaces(path) -> list[Surface]:
+    """Visi faile esantys paviršiai (LandXML gali turėti kelis)."""
+    p = Path(path)
+    if p.suffix.lower() == ".xml":
+        from . import io_landxml
+        return [Surface.from_dict(d) for d in io_landxml.read_surfaces(p) if len(d["tris"])]
+    return [load_surface(p)]
+
+
+def load_point_set(path, log=None):
+    """Matavimo taškai su pavadinimais ir kodais: CSV/TXT (P,E,N,Z,kodas) arba DXF POINT (kodas = sluoksnis).
+    -> (xyz (n,3), names, codes)"""
+    p = Path(path)
+    ext = p.suffix.lower()
+    if ext in (".csv", ".txt"):
+        from . import io_csv
+        ps = io_csv.read_points(p)
+        if log and ps.note:
+            log(f"  {p.name}: {ps.note}")
+        return ps.xyz, list(ps.names), list(ps.codes)
+    if ext == ".dxf":
+        from . import io_dxf
+        xyz, lay = io_dxf.read_points(p, include_inserts=True)
+        if not len(xyz):
+            raise ValueError(f"{p.name}: DXF nėra taškų (POINT / blokų). Taškus eksportuokite iš TBC kaip CSV.")
+        return xyz, [str(i + 1) for i in range(len(xyz))], list(lay)
+    raise ValueError(f"{p.name}: taškams tinka CSV / TXT arba DXF")
